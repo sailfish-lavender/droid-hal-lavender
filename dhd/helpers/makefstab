@@ -1,0 +1,166 @@
+#!/usr/bin/perl -w
+use File::Basename;
+
+# Modify to handle both fstab and .rc files
+
+my @files;
+my @skip;
+my $args = "";
+my $outputdir=".";
+while (@ARGV) {
+  $_ = shift @ARGV;
+  if (/^--/) {
+    $args=$_; next;
+  }
+
+  if ($args eq "--files") {
+    push @files, $_;
+  } elsif ($args eq "--skip") {
+    push @skip, $_;
+  } elsif ($args eq "--outputdir") {
+    $outputdir=$_;
+  } else {
+    print "Unrecognised args; not part of --files or --skip\n";
+    exit 1;
+  }
+}
+
+sub write_unit {
+  my ($opdir, $uname, $secontext, $m_flagsandoptions, $typ, $source, $mnt_target, $fil, $cont) = @_;
+  open(UNIT, ">$opdir/$uname.mount") or die "Couldn't write to $outputdir/$uname.mount\n";
+
+  $secontext = "";
+  if ($m_flagsandoptions =~ s/(context=[^,]*)//) {
+    $secontext = $1;
+  }
+  # tidy up in case we left leading,trailing or paired ,s
+  $m_flagsandoptions =~ s/,,/,/;
+  $m_flagsandoptions =~ s/^,//;
+  $m_flagsandoptions =~ s/,$//;
+
+  print UNIT <<"END" ;
+[Unit]
+Description=Droid mount for $mnt_target
+Before=local-fs.target systemd-modules-load.service
+
+[Mount]
+What=$source
+Where=$mnt_target
+Type=$typ
+Options=$m_flagsandoptions
+# Options had SELinux context option:  $secontext
+
+# Default is 90 which makes mount period too long in case of
+# errors so drop it down a notch.
+TimeoutSec=10
+
+[Install]
+WantedBy=local-fs.target
+
+# From $fil :
+# $cont
+END
+  print "Wrote $uname.unit\n";
+  close UNIT;
+}
+
+for my $file (@files) {
+  open(FILE, "<$file") or die "Can't read from $file\n";
+  next if $file =~ /goldfish/;
+
+  while (<FILE>) {
+    next if /^\s*#/ or /^\s*$/;
+
+    chomp;
+    my ($cmd, $src, $mnt_point, $type, $mnt_flagsandoptions, $fs_mgr_flags);
+
+    if (basename($file) =~ /.rc$/ ) {    # mount commands from rc files
+      next unless /^\s*mount\s+/;
+      my $tmpopts;
+      ($cmd, $type, $src, $mnt_point, $tmpopts) = split(" ", $_, 5);
+      $tmpopts ||= ""; # hush in case there are no options
+      # Now extract wait and check options into $fs_mgr_flags as I think they#re none-standard
+      my @opts = split(/ /, $tmpopts);
+
+      $fs_mgr_flags = "";
+      $mnt_flagsandoptions = "";
+      while (@opts) {
+        my $opt = shift @opts;
+        if ($opt =~ /^wait/) {
+          # systemd waits for devices by default so just strip this option
+          # See core/init/builtins.c ~ line 446
+        } else {
+          $mnt_flagsandoptions = "$mnt_flagsandoptions $opt";
+        }
+      }
+      # and convert ' ' to ,:
+      $fs_mgr_flags =~ s/\s+/,/g;
+      $mnt_flagsandoptions =~ s/\s+/,/g;
+
+    } elsif ( basename($file) =~ /^fstab/ ) { # /dev... from fstab files
+      ($src, $mnt_point, $type, $mnt_flagsandoptions, $fs_mgr_flags) = split;
+    } else {
+      print "Can't process file $file. Not an fstab.* or a *.rc\n";
+      exit 1;
+    };
+
+    # droid init.c converts mtd@xxxx to /dev/block/mtdblock%d using
+    # mtd_name_to_number(xxxx) and loop@xxxx to a loopback mount on
+    # file xxxx (I think)
+    next if  grep( /^$mnt_point$/, @skip) ;
+
+    # emmc doesn't work. It may be nice to generate these in a
+    # disabled state.
+    next if $type =~ /emmc/ ;
+
+    # From: http://www.freedesktop.org/software/systemd/man/systemd.unit.html :
+    # For unit names reflecting paths
+    # Example: a device unit dev-sda.device == /dev/sda
+    $unitname = $mnt_point;
+    # all unprintable characters and the "-" are replaced by
+    # C-style "\x2d" escapes.
+    ###### FIXME - not all implemented #####
+    $unitname =~ s/\ /\\x20/;
+    $unitname =~ s/\!/\\x21/;
+    $unitname =~ s/\"/\\x22/;
+    $unitname =~ s/\#/\\x23/;
+    $unitname =~ s/\$/\\x24/;
+    $unitname =~ s/\%/\\x25/;
+    $unitname =~ s/\&/\\x26/;
+    $unitname =~ s/\'/\\x27/;
+    $unitname =~ s/\(/\\x28/;
+    $unitname =~ s/\)/\\x29/;
+    $unitname =~ s/\*/\\x2a/;
+    $unitname =~ s/\+/\\x2b/;
+    $unitname =~ s/\,/\\x2c/;
+    $unitname =~ s/\-/\\x2d/;
+    $unitname =~ s/\./\\x2e/;
+    # Given a path, "/" is replaced by "-",
+    $unitname =~ tr(/)(-);
+    # The initial and ending "/" is removed from all paths during
+    # transformation. This escaping is reversible.
+    $unitname =~ s/^-//;
+    $unitname =~ s/-$//;
+
+    # if unitname is "" that means it was intended to be mounted as /.
+    # in Android 8 this is the system partition which we need to treat
+    # specially.
+    if ( $unitname eq "" ) {
+        $unitname = "system_root";
+        $mnt_point = "/system_root";
+    }
+
+    if (-f "$unitname.mount" ) {
+      print "Error, $unitname.mount already exists\n";
+      exit 1;
+    }
+
+    write_unit($outputdir, $unitname, $secontext, $mnt_flagsandoptions, $type, $src, $mnt_point, $file, $_);
+
+    # in case of an Android 8 root partition, bind mount /system_root/system
+    # to /system to make sure everything is in the proper place.
+    if ( $unitname eq "system_root" ) {
+      write_unit($outputdir, "system", $secontext, "bind", "none", "/system_root/system", "/system", $file, $_);
+    }
+  }
+}
