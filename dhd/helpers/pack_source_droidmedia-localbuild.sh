@@ -20,10 +20,6 @@ mkdir -p $fold/out/target/product/${OUT_DEVICE}/system/${DROIDLIB}
 mkdir -p $fold/out/target/product/${OUT_DEVICE}/system/bin
 mkdir -p $fold/external/droidmedia
 
-if [ -d ./external/droidmedia/init ]; then
-    mkdir -p $fold/external/droidmedia/init
-    cp ./external/droidmedia/init/*.rc $fold/external/droidmedia/init
-fi
 cp ./external/droidmedia/*.h $fold/external/droidmedia/
 cp ./external/droidmedia/hybris.c $fold/external/droidmedia/
 cp ./out/target/product/${OUT_DEVICE}/system/${DROIDLIB}/libdroidmedia.so $fold/out/target/product/${OUT_DEVICE}/system/${DROIDLIB}/
